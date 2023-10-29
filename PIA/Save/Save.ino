@@ -1,0 +1,1291 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Adafruit_GFX.h>    // Core graphics library
+#include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
+#include <string.h>
+
+#define RFID_RST 22          
+#define RFID_SS 15           
+
+#define TFT_CS  5
+#define TFT_RST 4
+#define TFT_DC  2
+
+#define MISO_PIN  19 
+#define MOSI_PIN  23 
+#define SCK_PIN   18 
+
+#define BTN_SUS 27
+#define BTN_JOS 33
+#define BTN_STG 26
+#define BTN_DRP 25
+#define BTN_YES 16
+#define BTN_NOT 17
+
+#define BUZZER  14
+#define BUZZER2 32
+
+/* Color code
+ST77XX_MAGENTA - purple
+ST77XX_BLUE - red
+ST77XX_RED - blue
+ST77XX_CYAN - yellow
+ST7735_ORANGE - cyan
+ST77XX_YELLOW - cyan
+ST77XX_WHITE - whitte
+ST77XX_BLACK - black
+*/
+
+int btnSusStare = 0,btnJosStare = 0,btnDrpStare = 0,btnStgStare = 0,btnYesStare = 0,btnNotStare = 0;
+const int nrOptionsMenu=3;
+
+int loadingScreenMultiplier=0;
+bool sunet=false;
+int gameSpeedBumpMultiplier=12;//Mai mic mai bine (rapid) :)
+int playGorundSize=15;
+
+
+MFRC522 rfid(RFID_SS, RFID_RST);  // Create MFRC522 instance
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+/*----------------------TFT DRAW-----------------------------*/
+
+void scrieText(char *text, uint16_t color, uint16_t poz_X, uint16_t poz_Y, bool wrap_text, uint16_t size_text) {
+  if(poz_X>=0 && poz_X<tft.width() && poz_Y>=0 && poz_Y<tft.height())
+    tft.setCursor(poz_X, poz_Y);
+  else
+    tft.setCursor(0, 0);
+  tft.setTextColor(color);
+  tft.setTextWrap(wrap_text);
+  if(size_text>=0 && size_text<=6)
+    tft.setTextSize(size_text);
+  else 
+    tft.setTextSize(1);
+  tft.print(text);
+}
+
+/*------------------------MENU-------------------------------*/
+void Menu(int select){
+  tft.fillScreen(ST77XX_BLACK);
+  
+  char options[3][8];
+  strcpy(options[0]," START ");
+  strcpy(options[1],"DEV SET");
+  strcpy(options[2],"GME SET");
+
+  int errY=26;
+  
+  for(int i=0;i<nrOptionsMenu;i++){
+    if(select==i){
+      tft.fillRect(15, 20+errY*i, 99, 24,ST77XX_WHITE);
+      scrieText(options[i], ST77XX_BLACK, 22, 25+errY*i, true, 2);
+    }
+    else{
+      tft.drawRect(15, 20+errY*i, 99, 24,ST77XX_WHITE);
+      scrieText(options[i], ST77XX_WHITE, 22, 25+errY*i, true, 2);
+    }
+    
+  }
+}
+void InsertGameMenu(){
+  tft.fillScreen(ST77XX_BLACK);
+  scrieText("INSERT", ST77XX_WHITE, 28, 9, true, 2);
+  scrieText(" GAME", ST77XX_WHITE, 28, 25, true, 2);
+  tft.drawLine(0,45,128,45,ST77XX_WHITE);
+  scrieText("Waiting", ST77XX_BLUE, 22, 50, true, 2);
+}
+void DevSetMenu(){
+  tft.fillScreen(ST77XX_BLACK);
+  scrieText(" DEVICE ", ST77XX_WHITE, 16, 9, true, 2);
+  scrieText("SETTINGS", ST77XX_WHITE, 16, 25, true, 2);
+  tft.drawLine(0,45,128,45,ST77XX_WHITE);
+}
+void GameSelectMenu(int game){
+  tft.fillRect(28, 9, 100, 30,ST77XX_BLACK);
+  scrieText(" GAME", ST77XX_WHITE, 28, 9, true, 2);
+  scrieText("INSERTED", ST77XX_WHITE, 16, 25, true, 2);
+  if(game==1){
+     tft.fillRect(22, 50, 106, 64,ST77XX_BLACK);
+     scrieText("Move it", ST77XX_BLUE, 22, 50, true, 2);
+  }
+  else if(game==2){
+    tft.fillRect(22, 50, 106, 64,ST77XX_BLACK);
+    scrieText(" Snake", ST77XX_BLUE, 22, 50, true, 2);
+  }
+  else if(game==3){
+    tft.fillRect(22, 50, 106, 64,ST77XX_BLACK);
+    scrieText(" Ships", ST77XX_BLUE, 22, 50, true, 2);
+  }
+}
+int InsertGame(){
+  String tag="";
+  int game=1;
+
+  if(!rfid.PICC_IsNewCardPresent())
+    return 0;
+  if(rfid.PICC_ReadCardSerial()){
+    for (byte i = 0; i < 4; i++){
+      tag += rfid.uid.uidByte[i];
+    }
+    Serial.println(tag);
+    
+    if(tag=="170176101152")
+      game=2;
+    if(tag=="17019818692")
+      game=3;
+    
+    tag = "";
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+    return game;
+  }
+  return 0;
+}
+
+int matrix[16][16],matrixPlayer1[11][11],matrixPlayer2[11][11];
+int pozPlayerX=7,pozPlayerY=7;
+int sizePlayer=8;
+int head=0,tail=0;
+const int errX=4;
+const int errY=36;
+
+class XY{
+public:
+  int x=7;
+  int y=7;
+}body[252],directions[5],center;
+
+/*------------------------GAMES-------------------------------*/
+/*-----------------------MOVE IT------------------------------*/
+
+int MovePlayer(String mutare){
+
+  tft.fillRect(errX+pozPlayerX*sizePlayer, errY+pozPlayerY*sizePlayer, sizePlayer, sizePlayer,ST7735_BLACK);//Stergem Player Vechi
+  
+  matrix[pozPlayerY][pozPlayerX]=0;
+  if(mutare=="dreapta"){
+    if(pozPlayerX<14){
+      pozPlayerX++;
+    }
+  }
+  if(mutare=="stanga"){
+    if(pozPlayerX>0){
+      pozPlayerX--;
+    }
+  }
+  if(mutare=="sus"){
+    if(pozPlayerY<14){
+      pozPlayerY++;
+    }
+  }
+  if(mutare=="jos"){
+    if(pozPlayerY>0){
+      pozPlayerY--;
+    }
+  }
+  tft.fillRect(errX+pozPlayerX*sizePlayer, errY+pozPlayerY*sizePlayer, sizePlayer, sizePlayer,ST7735_YELLOW);//Punem player Nou
+  if(matrix[pozPlayerY][pozPlayerX]==2){
+      PlacePoint(ST7735_BLUE,true);
+      if(sunet==true){
+        //tone(BUZZER,4000,200);
+      }
+      matrix[pozPlayerY][pozPlayerX]=1;
+      tft.fillRect(errX+pozPlayerX*sizePlayer, errY+pozPlayerY*sizePlayer, sizePlayer, sizePlayer,ST7735_YELLOW);//Punem player Nou
+  return 1;
+    }
+  matrix[pozPlayerY][pozPlayerX]=1;
+  tft.fillRect(errX+pozPlayerX*sizePlayer, errY+pozPlayerY*sizePlayer, sizePlayer, sizePlayer,ST7735_YELLOW);//Punem player Nou
+  return 0;
+}
+void Game1GFX(char *score,bool generatePoint){
+  tft.fillScreen(ST77XX_BLACK);
+  scrieText("Score: ", ST77XX_WHITE, 15, 5, true, 2);
+  Serial.println(score);
+  scrieText(score, ST77XX_WHITE, 87, 5, true, 2);
+  
+  tft.fillRect(0, errY-errX, errX, 128,ST7735_WHITE);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_WHITE);//Margine jos
+  tft.fillRect(124, errY-errX, errX, 160-(errY-errX),ST7735_WHITE);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_WHITE);//Margine sus
+
+  tft.fillRect(errX+pozPlayerX*sizePlayer, errY+pozPlayerY*sizePlayer, sizePlayer, sizePlayer,ST7735_YELLOW);
+
+  PlacePoint(ST7735_BLUE,generatePoint);
+  matrix[pozPlayerY][pozPlayerX]=1;
+}
+
+/*-----------------------SNAKE--------------------------------*/
+
+void DrawFace(int dir,int color,bool sterge){
+  if(dir==1||sterge==true){
+    tft.fillRect(5+body[head].x*sizePlayer, 37+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+    tft.fillRect(9+body[head].x*sizePlayer, 37+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+  }
+  if(dir==2||sterge==true){
+    tft.fillRect(9+body[head].x*sizePlayer, 37+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+    tft.fillRect(9+body[head].x*sizePlayer, 42+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+  }
+  if(dir==3||sterge==true){
+    tft.fillRect(5+body[head].x*sizePlayer, 42+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+    tft.fillRect(9+body[head].x*sizePlayer, 42+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+  }
+  if(dir==4||sterge==true){
+    tft.fillRect(5+body[head].x*sizePlayer, 37+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+    tft.fillRect(5+body[head].x*sizePlayer, 42+body[head].y*sizePlayer, sizePlayer/4, sizePlayer/4,color);//Punem ochi
+  }
+}
+void MoveSnake(int dir,bool grow){
+  if(head-tail>0)
+    DrawFace(dir,ST7735_GREEN,true);//Stergem Cap
+    
+  if(grow==false){
+    tft.fillRect(errX+body[tail].x*sizePlayer, errY+body[tail].y*sizePlayer, sizePlayer, sizePlayer,ST7735_BLACK);//Stergem Coada
+    tail++;
+    if(tail>250)
+      tail=0;
+  }
+
+  head++;
+  if(head>250){
+    body[0].x=body[head-1].x+directions[dir].x;
+    body[0].y=body[head-1].y+directions[dir].y;
+    head=0;
+  }
+  else{
+    body[head].x=body[head-1].x+directions[dir].x;
+    body[head].y=body[head-1].y+directions[dir].y;
+  }
+  tft.fillRect(errX+body[head].x*sizePlayer, errY+body[head].y*sizePlayer, sizePlayer, sizePlayer,ST7735_GREEN);//Punem Cap
+  DrawFace(dir,ST7735_BLUE,false);//Desenam fata
+}
+bool UpdatePlayer(int dir,int &score){
+  if(body[head].x+directions[dir].x>=0&&body[head].x+directions[dir].x<15&&body[head].y+directions[dir].y>=0&&body[head].y+directions[dir].y<15){
+    if(matrix[body[head].y+directions[dir].y][body[head].x+directions[dir].x]==0){
+        matrix[body[head].y+directions[dir].y][body[head].x+directions[dir].x]=1;
+        matrix[body[tail].y][body[tail].x]=0;
+        MoveSnake(dir,false);
+        return true;
+    }
+    else
+    if(matrix[body[head].y+directions[dir].y][body[head].x+directions[dir].x]==2){
+        matrix[body[head].y+directions[dir].y][body[head].x+directions[dir].x]=1;
+
+        score++;
+        ModifyScore(score);
+        
+        MoveSnake(dir,true);
+
+        PlacePoint(ST7735_BLUE,true);
+        return true;
+    }
+  }
+  return false;
+}
+void GameOverSnake(){
+  int mult=1;
+  
+  tft.fillRect(0, errY-errX, errX, 160-(errY-errX),ST7735_BLUE);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_BLUE);//Margine jos
+  tft.fillRect(128-errX, errY-errX, errX, 160-(errY-errX),ST7735_BLUE);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_BLUE);//Margine sus
+  delay(1000*mult);
+  tft.fillRect(0, errY-errX, errX, 160-(errY-errX),ST7735_RED);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_RED);//Margine jos
+  tft.fillRect(128-errX, errY-errX, errX, 160-(errY-errX),ST7735_RED);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_RED);//Margine sus
+  delay(1000*mult);
+  tft.fillRect(0, errY-errX, errX, 160-(errY-errX),ST7735_BLUE);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_BLUE);//Margine jos
+  tft.fillRect(128-errX, errY-errX, errX, 160-(errY-errX),ST7735_BLUE);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_BLUE);//Margine sus
+  delay(1000*mult);
+  tft.fillRect(0, errY-errX, errX, 160-(errY-errX),ST7735_RED);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_RED);//Margine jos
+  tft.fillRect(128-errX, errY-errX, errX, 160-(errY-errX),ST7735_RED);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_RED);//Margine sus
+  delay(1000*mult);
+}
+void Game2GFX(char *score,int dir,bool generatePoint){
+  tft.fillScreen(ST77XX_BLACK);
+  scrieText("Score: ", ST77XX_WHITE, 15, 5, true, 2);
+  Serial.println(score);
+  scrieText(score, ST77XX_WHITE, 87, 5, true, 2);
+  
+  tft.fillRect(0, errY-errX, errX, 160-(errY-errX),ST7735_WHITE);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,ST7735_WHITE);//Margine jos
+  tft.fillRect(128-errX, errY-errX, errX, 160-(errY-errX),ST7735_WHITE);//Margine dreapta
+  tft.fillRect(0, errY-errX, 128, errX,ST7735_WHITE);//Margine sus
+
+  tft.fillRect(errX+body[head].x*sizePlayer, errY+body[head].y*sizePlayer, sizePlayer, sizePlayer,ST7735_GREEN);
+  DrawFace(dir,ST7735_BLUE,false);
+  
+  PlacePoint(ST7735_BLUE,generatePoint);
+  matrix[body[head].y][body[head].x]=1;
+}
+void DebugSnake(){
+  Serial.println("\n\n---------------\n\n");
+  Serial.println(head);
+  Serial.println(tail);
+  for(int i=tail;i<head;i++){
+    Serial.print(body[i].x);
+    Serial.print(" ");
+    Serial.print(body[i].y);
+    Serial.print("\n");
+  }
+  for(int i=0;i<15;i++){
+    for(int j=0;j<15;j++){
+      Serial.print(matrix[i][j]);
+      Serial.print(" ");
+    }
+    Serial.print("\n");
+  }
+  Serial.println("\n\n---------------\n\n");
+}
+
+/*-----------------------SHIPS--------------------------------*/
+
+void DebugMatrix1(){
+  Serial.println();
+  for(int i=0;i<10;i++){
+    for(int j=0;j<10;j++){
+      Serial.print(matrixPlayer1[i][j]);
+      Serial.print("   ");
+    }
+    Serial.println();
+  }
+  Serial.println();
+  Serial.println();
+  Serial.println();
+}
+void DebugMatrix2(){
+  Serial.println();
+  for(int i=0;i<10;i++){
+    for(int j=0;j<10;j++){
+      Serial.print(matrixPlayer2[i][j]);
+      Serial.print("   ");
+    }
+    Serial.println();
+  }
+  Serial.println();
+  Serial.println();
+  Serial.println();
+}
+bool CanBePlaced(int selectedShip,int dir,int x,int y){
+  bool ok=true;
+  for(int i=0;i<selectedShip;i++){
+    if(matrix[y+i*directions[dir].y][x+i*directions[dir].x]>=200){
+      ok=false;
+    }
+  }
+  return ok;
+}
+int InvertedDirection(int dir){
+  if(dir==2)
+    return 4;
+  else
+  if(dir==1)
+    return 3;
+  else
+  if(dir==3)
+    return 1;
+  if(dir==4)
+    return 2;
+  tone(BUZZER,2000,100);
+  return 0;
+}
+void ShowGrid(){
+  for(int i=0;i<11;i++){//Horizontal
+    tft.drawLine(3,35+i*12,125,35+i*12,ST77XX_WHITE);
+    tft.drawLine(3,35+i*12+1,125,35+i*12+1,ST77XX_WHITE);
+  }
+  for(int i=0;i<11;i++){//Vertical
+    tft.drawLine(3+i*12,35,3+i*12,157,ST77XX_WHITE);
+    tft.drawLine(3+i*12+1,35,3+i*12+1,157,ST77XX_WHITE);
+  }
+}
+void Strike(int x,int y,bool success){
+  if(success==true){//Desenam x
+    tft.drawLine(errX+x*12+1,errY+y*12+1,errX+x*12+10,errY+y*12+10,ST77XX_BLUE);//diagonala pricipala
+    tft.drawLine(errX+x*12+10,errY+y*12+1,errX+x*12+1,errY+y*12+10,ST77XX_BLUE);//diagonala secundara
+  }
+  else{//Desenam +
+    tft.drawLine(errX+x*12+5,errY+y*12+3,errX+x*12+5,errY+y*12+7,ST77XX_BLUE);//verticala
+    tft.drawLine(errX+x*12+3,errY+y*12+5,errX+x*12+7,errY+y*12+5,ST77XX_BLUE);//orizontala
+  }
+}
+void Game3GFX(short player,int selectedShip){
+  int errX=3,errY=32,color;
+  if(player==0)
+    color=ST7735_GREEN;
+  else
+    color=ST7735_RED;
+    
+  if(selectedShip>0){
+    tft.fillScreen(ST77XX_BLACK);
+    if(player==0){
+      scrieText("STAGE 1", ST77XX_WHITE, 15, 6, true, 2);
+      scrieText("Place Ships p1!", ST77XX_WHITE, 15, 23, true, 1);
+    }
+    else{
+      scrieText("STAGE 2", ST77XX_WHITE, 15, 6, true, 2);
+      scrieText("Place Ships p2!", ST77XX_WHITE, 15, 23, true, 1);
+    }
+     
+    delay(2000*loadingScreenMultiplier+1000);
+    tft.fillRect(15, 6, 100, 25,ST77XX_BLACK);//Sterge text
+    scrieText("Place Ships!", ST77XX_WHITE, 15, 6, true, 1);
+    ShowGrid(); 
+    PreviewShip(selectedShip,ST7735_BLUE);
+  }
+  else
+  if(selectedShip==-1){
+    tft.fillScreen(ST77XX_BLACK);
+    scrieText("STAGE 3", ST77XX_WHITE, 15, 6, true, 2);
+    scrieText("Attack the enemy!", ST77XX_WHITE, 15, 23, true, 1);
+    delay(2000*loadingScreenMultiplier+1000);
+    tft.fillRect(15, 6, 100, 25,ST77XX_BLACK);//Sterge text
+    if(player==0)
+      scrieText("Player 1 attacks!", ST77XX_WHITE, 15, 6, true, 1);
+    else
+      scrieText("Player 2 attacks!", ST77XX_WHITE, 15, 6, true, 1);
+    ShowGrid(); 
+  }
+  else{
+    tft.fillRect(15, 6, 100, 25,ST77XX_BLACK);//Sterge text
+    if(player==0)
+      scrieText("Player 1 attacks!", ST77XX_WHITE, 15, 6, true, 1);
+    else
+      scrieText("Player 2 attacks!", ST77XX_WHITE, 15, 6, true, 1);
+      
+    if(player==0){
+      for(int i=0;i<10;i++){
+        for(int j=0;j<10;j++){
+          if(matrixPlayer2[i][j]!=0){
+            StergeGFX(j,i,true,true,true,true,true);
+          }
+          if(matrixPlayer1[i][j]>700&&matrixPlayer1[i][j]<800){//Trebuie adaugat situatie cand a fost distrusa integral o nava
+            Strike(j,i,true);
+          }
+          else if(matrixPlayer1[i][j]==500){
+            Strike(j,i,false);
+          }
+        }
+      }
+    }
+    else{
+      for(int i=0;i<10;i++){
+        for(int j=0;j<10;j++){
+          if(matrixPlayer1[i][j]!=0){
+            StergeGFX(j,i,true,true,true,true,true);
+          }
+          if(matrixPlayer2[i][j]>700&&matrixPlayer2[i][j]<800){
+            Strike(j,i,true);
+          }
+          else if(matrixPlayer2[i][j]==500){
+            Strike(j,i,false);
+          }
+        }
+      }
+      Serial.println("MATRICE PLAYER 1");
+      DebugMatrix1();
+      Serial.println("MATRICE PLAYER 2");
+      DebugMatrix2();
+    }
+  }
+  if(selectedShip==0){
+    if(player==0)
+      color=ST7735_RED;
+    else
+      color=ST7735_GREEN;
+  }
+  tft.fillRect(0, errY, errX, 160-errY,color);//Margine stanga
+  tft.fillRect(0, 160-errX, 128, errX,color);//Margine jos
+  tft.fillRect(128-errX, errY, errX, 160-errY,color);//Margine dreapta
+  tft.fillRect(0, errY, 128, errX,color);//Margine sus
+  
+}
+void PreviewShip(int selectedShip,int color){
+  tft.fillRect(10,20,100,8,ST77XX_BLACK);
+  if(selectedShip==5)
+    return;
+  if(selectedShip%2==0){
+    selectedShip=selectedShip-2;
+    tft.fillRect(errX+(4-selectedShip/2)*12+2, 20, 10, 8,color);  
+    for(int i=1;i<=selectedShip;i++){
+      tft.fillRect(errX+(4-selectedShip/2+i)*12, 20, 12, 8,color);
+    }
+    tft.fillRect(errX+(5+selectedShip/2)*12, 20, 10, 8,color);
+  }
+  else
+  if(selectedShip%3==0){
+    selectedShip=selectedShip-2;
+    tft.fillRect(errX+(3-selectedShip/2)*12+2+6, 20, 10, 8,color);  
+    for(int i=1;i<=selectedShip;i++){
+      tft.fillRect(errX+(3-selectedShip/2+i)*12+6, 20, 12, 8,color);
+    }
+    tft.fillRect(errX+(5+selectedShip/2)*12+6, 20, 10, 8,color);
+  }
+}
+void StergeGFX(int x,int y,bool sus,bool drp,bool jos,bool stg,bool interior){
+  //Contur
+  if(sus)
+    tft.drawLine(errX+x*12,errY+y*12,errX+x*12+11,errY+y*12,ST77XX_WHITE);//sus
+  if(stg)
+    tft.drawLine(errX+x*12,errY+y*12,errX+x*12,errY+y*12+11,ST77XX_WHITE);//stg
+  if(drp)
+    tft.drawLine(errX+x*12+11,errY+y*12,errX+x*12+11,errY+y*12+11,ST77XX_WHITE);//drp
+  if(jos)
+    tft.drawLine(errX+x*12,errY+y*12+11,errX+x*12+11,errY+y*12+11,ST77XX_WHITE);//jos
+  
+  //Interior
+  if(interior)
+    tft.fillRect(errX+x*12+1, errY+y*12+1, 10, 10,ST77XX_BLACK);
+}
+void SelectSquareGFX(int module,int dir,int x,int y){
+  int color=ST7735_BLUE;
+  if(module!=-1)
+    matrix[y][x]+=500;
+  else
+    module=1;
+  if(module==1){
+    if(dir!=3)
+      tft.drawLine(errX+x*12,errY+y*12,errX+x*12+11,errY+y*12,color);//sus
+    if(dir!=2)
+      tft.drawLine(errX+x*12,errY+y*12,errX+x*12,errY+y*12+11,color);//stg
+    if(dir!=4)
+      tft.drawLine(errX+x*12+11,errY+y*12,errX+x*12+11,errY+y*12+11,color);//drp
+    if(dir!=1)
+      tft.drawLine(errX+x*12,errY+y*12+11,errX+x*12+11,errY+y*12+11,color);//jos
+  }
+  else
+  if(module==2){
+    if(dir==2||dir==4){
+      tft.drawLine(errX+x*12,errY+y*12,errX+x*12+11,errY+y*12,color);//sus
+      tft.drawLine(errX+x*12,errY+y*12+11,errX+x*12+11,errY+y*12+11,color);//jos
+    }
+    if(dir==1||dir==3){
+      tft.drawLine(errX+x*12,errY+y*12,errX+x*12,errY+y*12+11,color);//stg
+      tft.drawLine(errX+x*12+11,errY+y*12,errX+x*12+11,errY+y*12+11,color);//drp
+    }
+  }
+}
+void MoveShip(int selectedShip,int dir,int x,int y,int color,int playerColor){
+  //Curatare vizuala in matricea navelor
+  for(int i=0;i<10;i++){
+    for(int j=0;j<10;j++){
+      if(matrix[i][j]>=100&&matrix[i][j]<200){
+        StergeGFX(j,i,true,true,true,true,true);
+        matrix[i][j]=0;
+      }
+      else
+      if(matrix[i][j]>600){
+        StergeGFX(j,i,true,true,true,true,true);
+        PlaceModuleGFX((matrix[i][j]/10)%10,matrix[i][j]%10,j,i,playerColor);
+        matrix[i][j]+=100;
+      }
+      else
+      if(matrix[i][j]==500){
+        StergeGFX(j,i,true,true,true,true,true);
+        matrix[i][j]=0;
+      }
+    }
+  }
+  
+  if(CanBePlaced(selectedShip,dir,x,y)==true){
+    for(int i=0;i<selectedShip;i++){
+      if(i==0){
+        PlaceModuleGFX(1,InvertedDirection(dir),x+i*directions[dir].x,y+i*directions[dir].y,color);
+      }else
+      if(i==selectedShip-1){
+        PlaceModuleGFX(1,dir,x+i*directions[dir].x,y+i*directions[dir].y,color);
+      }
+      else{
+        PlaceModuleGFX(2,dir,x+i*directions[dir].x,y+i*directions[dir].y,color);
+      }
+    }
+  }
+  else{
+    for(int i=0;i<selectedShip;i++){
+      if(i==0){
+        SelectSquareGFX(1,InvertedDirection(dir),x+i*directions[dir].x,y+i*directions[dir].y);
+      }else
+      if(i==selectedShip-1){
+        SelectSquareGFX(1,dir,x+i*directions[dir].x,y+i*directions[dir].y);
+      }
+      else{
+        SelectSquareGFX(2,dir,x+i*directions[dir].x,y+i*directions[dir].y);
+      }
+    }
+  }
+}
+void PlaceModuleGFX(int module,int orientation,int pozX,int pozY,int color){
+  if(module==1){//Cap 
+    if(orientation==1){//Sus se leaga
+      tft.fillRect(errX+pozX*12+2, errY+pozY*12+2, 8, 10,color);
+      matrix[pozY][pozX]=111;
+    }
+    else if(orientation==2){//Dreapta se leaga
+      tft.fillRect(errX+pozX*12, errY+pozY*12+2, 10, 8,color);
+      matrix[pozY][pozX]=112;
+    }
+    else if(orientation==3){//Jos se leaga
+      tft.fillRect(errX+pozX*12+2, errY+pozY*12, 8, 10,color);
+      matrix[pozY][pozX]=113;
+    }
+    else if(orientation==4){//Stanga se leaga
+      tft.fillRect(errX+pozX*12+2, errY+pozY*12+2, 10, 8,color);
+      matrix[pozY][pozX]=114;
+    }
+  }
+  else if(module==2){//Corp
+    if(orientation==2||orientation==4){//Stanga si Dreapta
+      tft.fillRect(errX+pozX*12, errY+pozY*12+2, 12, 8,color);
+      matrix[pozY][pozX]=122;
+    }
+    else if(orientation==3||orientation==1){//Sus si Jos
+      tft.fillRect(errX+pozX*12+2, errY+pozY*12, 8, 12,color);
+      matrix[pozY][pozX]=121;
+    }
+  }
+}
+void PlaceShip(int selectedShip,int dir,int x,int y,int color){
+  for(int i=0;i<selectedShip;i++){
+    if(i==0){
+      PlaceModuleGFX(1,InvertedDirection(dir),x+i*directions[dir].x,y+i*directions[dir].y,color);
+    }else
+    if(i==selectedShip-1){
+      PlaceModuleGFX(1,dir,x+i*directions[dir].x,y+i*directions[dir].y,color);
+    }
+    else{
+      PlaceModuleGFX(2,dir,x+i*directions[dir].x,y+i*directions[dir].y,color);
+    }
+    matrix[y+i*directions[dir].y][x+i*directions[dir].x]+=100;
+  }
+}
+void DonePlaceing1(){
+  pozPlayerX=5;
+  pozPlayerY=5;
+  for(int i=0;i<10;i++){
+    for(int j=0;j<10;j++){
+      matrixPlayer1[i][j]=matrix[i][j];
+      matrix[i][j]=0;
+    }
+  }
+  Game3GFX(1,2);
+}
+void DonePlaceing2(){
+  pozPlayerX=5;
+  pozPlayerY=5;
+  for(int i=0;i<10;i++){
+    for(int j=0;j<10;j++){
+      matrixPlayer2[i][j]=matrix[i][j];
+      matrix[i][j]=0;
+    }
+  }
+  Game3GFX(0,-1);
+}
+
+/*-----------------COMMON GAME FUNCTIONS----------------------*/
+
+void ModifyScore(int scor){
+  char score[10];
+  int len=0,cp=scor;
+  if(cp==0)
+  {
+    len=1;
+    score[0]='0';
+  }
+  while(cp){
+    len++;
+    cp/=10;
+  }
+  score[len--]=NULL;
+  while(scor){
+    score[len--]=scor%10+'0';
+    scor/=10;
+  }
+  
+  tft.fillRect(0, 0, 128, errY-errX,ST7735_BLACK);//Sterge Scor
+  scrieText("Score:", ST77XX_WHITE, 15, 5, true, 2);
+  Serial.println(score);
+  scrieText(score, ST77XX_WHITE, 87, 5, true, 2);
+}
+void PlacePoint(int color,bool generate){
+  int pozPointX,pozPointY;
+  if(generate==true){
+    pozPointX=random(0,15);
+    pozPointY=random(0,15);
+    while(matrix[pozPointY][pozPointX]!=0){
+      pozPointY=random(0,15);
+      pozPointX=random(0,15);
+    }
+    matrix[pozPointY][pozPointX]=2;
+    tft.fillRect(errX+pozPointX*sizePlayer, errY+pozPointY*sizePlayer, sizePlayer, sizePlayer,color);
+  }
+  for(int i=0;i<16;i++){
+    for(int j=0;j<16;j++){
+      if(matrix[i][j]==2)
+      tft.fillRect(errX+j*sizePlayer, errY+i*sizePlayer, sizePlayer, sizePlayer,color);
+    }
+  }
+  /*Serial.print("Point y: ");
+  Serial.print(pozPointY);
+  Serial.print("\n");
+  Serial.print("Point x: ");
+  Serial.print(pozPointX);
+  Serial.print("\n---\n");*/
+}
+void PauseGameMenu(int select){ 
+  tft.fillScreen(ST77XX_BLACK);
+  
+  int errY=26;
+  char options[3][8];
+  strcpy(options[0],"RESUME");
+  strcpy(options[1],"RESTART");
+  strcpy(options[2]," QUIT");
+
+   scrieText(" GAME", ST77XX_WHITE, 28, 10, true, 2);
+   scrieText("PAUSED", ST77XX_WHITE, 28, 28, true, 2);
+
+
+  for(int i=0;i<nrOptionsMenu;i++){
+    if(select==i){
+      tft.fillRect(15, 50+errY*i, 99, 24,ST77XX_WHITE);
+      scrieText(options[i], ST77XX_BLACK, 22, 55+errY*i, true, 2);
+    }
+    else{
+      tft.drawRect(15, 50+errY*i, 99, 24,ST77XX_WHITE);
+      scrieText(options[i], ST77XX_WHITE, 22, 55+errY*i, true, 2);
+    }
+  }
+}
+
+void setup(){
+  Serial.begin(921600);   // Initialize serial communications with the PC
+  while (!Serial);    // Do nothing if no serial port is opened (added for Arduinos based on ATMEGA32U4)
+  
+  pinMode(BTN_SUS, OUTPUT);
+  pinMode(BTN_JOS, OUTPUT);
+  pinMode(BTN_DRP, OUTPUT);
+  pinMode(BTN_STG, OUTPUT);
+  pinMode(BTN_YES, OUTPUT);
+  pinMode(BTN_NOT, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(BUZZER2, OUTPUT);
+
+  directions[1].x=0;directions[2].x=1;directions[3].x=0;directions[4].x=-1;
+  directions[1].y=-1;directions[2].y=0;directions[3].y=1;directions[4].y=0;
+  
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);
+  rfid.PCD_Init(); 
+  
+  tft.initR(INITR_GREENTAB);      // Init ST7735S chip, green tab
+  tft.fillScreen(ST77XX_BLACK);
+  
+  Serial.println("Initialized");
+
+  scrieText("THE NEW", ST77XX_BLUE, 22, 30, true, 2);
+  scrieText("GAMEBOY", ST77XX_BLUE, 22, 46, true, 2);
+  scrieText("Made by:\nDulgheriu Bogdan\nRaicu Bianca", ST77XX_WHITE, 0, 135, true, 1);
+  delay(10000*loadingScreenMultiplier);
+
+  
+  if(sunet==true){
+    tone(BUZZER,2000,1000);
+    tone(BUZZER2,4000,500);
+  }
+  Menu(0);
+  // tft print function!
+}
+
+int selectMenu=0,menuPage=0,stage=0;
+int menu=0;
+bool shown=false;
+int score=0,headDirection=1;
+long long value=0;
+int selectedShip=0,color,player,shipsToPlace,shipsLeft1=6,shipsLeft2=6;
+
+void loop(){
+  btnSusStare = digitalRead(BTN_SUS);
+  btnJosStare = digitalRead(BTN_JOS);
+  btnDrpStare = digitalRead(BTN_DRP);
+  btnStgStare = digitalRead(BTN_STG);
+  btnYesStare = digitalRead(BTN_YES);
+  btnNotStare = digitalRead(BTN_NOT);
+
+  if(menu==0){//Meniu principal
+    if(menuPage==0){//Meniu
+      if(btnYesStare==HIGH){
+        shown=false;
+        menuPage=1+selectMenu;
+        selectMenu=0;
+        if(sunet==true);
+          //tone(BUZZER,2000,700);
+        delay(1000*loadingScreenMultiplier);
+      }
+      else if(btnSusStare==HIGH){
+        if(selectMenu<nrOptionsMenu-1)
+          selectMenu++;
+        Menu(selectMenu);
+      }
+      else if(btnJosStare==HIGH){
+        if(selectMenu>0)
+          selectMenu--;
+        Menu(selectMenu);
+      }
+      delay(100);
+    }
+    else if(menuPage==1){//Start
+      if(shown==false){
+        InsertGameMenu();
+        shown=true;
+        value=0;
+      }
+      menu=InsertGame();
+      if(menu!=0){
+        shown=false;
+        menuPage=0;
+        GameSelectMenu(menu);
+        delay(2000*loadingScreenMultiplier+1000);
+      }
+    }
+    else if(menuPage==2){//Setari Dispozitiv
+      if(shown==false){
+        DevSetMenu();
+        shown=true;
+        value=0;
+      }
+    }
+    else if(menuPage==3){//Setari Jocuri
+      
+    }
+
+    if(btnNotStare==HIGH){
+      shown=false;
+      menuPage=0;
+      selectMenu=0;
+      Menu(0);
+    }
+  }
+  else
+  if(menu==1){//Joc 1 Move it
+    if(menuPage==0){//Play
+      if(shown==false){
+        shown=true;
+        score=0;
+        Game1GFX("0",true);
+      }
+      
+      if(btnDrpStare==HIGH){
+        if(MovePlayer("dreapta")==1){
+          score++;
+          ModifyScore(score);
+        }
+      }
+      else if(btnJosStare==HIGH){
+        if(MovePlayer("jos")==1){
+          score++;
+          ModifyScore(score);
+        }
+      }
+      else if(btnStgStare==HIGH){
+        if(MovePlayer("stanga")==1){
+          score++;
+          ModifyScore(score);
+        }
+      }
+      else if(btnSusStare==HIGH){
+        if(MovePlayer("sus")==1){
+          score++;
+          ModifyScore(score);
+        }
+      }
+      
+      if(btnNotStare==HIGH){
+        selectMenu=0;
+        PauseGameMenu(selectMenu);
+        menuPage=1;
+      }
+      delay(100);
+    }
+    else if(menuPage==1){//Pause 
+      if(btnYesStare==HIGH){
+        if(selectMenu==0){//Resume 
+          Game1GFX("0",false);
+          ModifyScore(score);
+          menuPage=0;
+          selectMenu=0;
+          delay(2000*loadingScreenMultiplier+1000);
+        }
+        else
+        if(selectMenu==1){//Restart
+          score=0;
+          for(int i=0;i<15;i++)
+            for(int j=0;j<15;j++)
+              matrix[i][j]=0;
+          pozPlayerX=7;
+          pozPlayerY=7;
+          menuPage=0;
+          selectMenu=0;
+          Game1GFX("0",true);
+        }
+        else
+        if(selectMenu==2){//Quit
+          score=0;
+          menu=0;
+          Menu(0);
+          for(int i=0;i<15;i++)
+            for(int j=0;j<15;j++)
+              matrix[i][j]=0;
+          pozPlayerX=7;
+          pozPlayerY=7;
+          menuPage=0;
+          selectMenu=0;
+          delay(2000*loadingScreenMultiplier+1000);
+        }
+        if(sunet==true);
+          //tone(BUZZER,2000,700);
+      }
+      else if(btnSusStare==HIGH){
+        if(selectMenu<nrOptionsMenu-1)
+          selectMenu++;
+        PauseGameMenu(selectMenu);
+      }
+      else if(btnJosStare==HIGH){
+        if(selectMenu>0)
+          selectMenu--;
+        PauseGameMenu(selectMenu);
+      }
+      delay(100);
+    }
+  }
+  else
+  if(menu==2){//Joc 2 Snake
+    if(menuPage==0){//Play
+      if(shown==false){
+        shown=true;
+        value=0;
+        score=0;
+        headDirection=1;
+        Game2GFX("0",1,true);
+      }
+      if(btnJosStare==HIGH&&headDirection!=3)
+        headDirection=1;
+      if(btnDrpStare==HIGH&&headDirection!=4)
+        headDirection=2;
+      if(btnSusStare==HIGH&&headDirection!=1)
+        headDirection=3;
+      if(btnStgStare==HIGH&&headDirection!=2)
+        headDirection=4;
+        
+      if(btnNotStare==HIGH){
+        selectMenu=0;
+        PauseGameMenu(selectMenu);
+        menuPage=1;
+      }
+      
+      if(value==gameSpeedBumpMultiplier-1){
+        if(UpdatePlayer(headDirection,score)==false){//Game over
+          headDirection=1;
+          //DebugSnake();
+          menu=0;
+          shown=false;
+          head=0;
+          tail=0;
+          headDirection=1;
+          body[head].x=8;
+          body[tail].y=8;
+          for(int i=0;i<15;i++)
+            for(int j=0;j<15;j++)
+              matrix[i][j]=0;
+          GameOverSnake();
+          tft.fillScreen(ST77XX_BLACK);
+          Menu(0);
+        }
+        value=0;
+      }
+      else
+        value++;
+  
+      delay(30);
+    }
+    else if(menuPage==1){//Pause
+      if(btnYesStare==HIGH){
+        if(selectMenu==0){//Resume 
+          Game2GFX("0",headDirection,false);
+          ModifyScore(score);
+          menuPage=0;
+          selectMenu=0;
+          delay(2000*loadingScreenMultiplier+1000);
+        }
+        else
+        if(selectMenu==1){//Restart
+          score=0;
+          menuPage=0;
+          selectMenu=0;
+          for(int i=0;i<15;i++)
+            for(int j=0;j<15;j++)
+              matrix[i][j]=0;
+          head=0;
+          tail=0;
+          body[head].x=7;
+          body[tail].y=7;
+          headDirection=1;
+          tft.fillScreen(ST77XX_BLACK);
+          Game2GFX("0",headDirection,true);
+          delay(2000*loadingScreenMultiplier+1000);
+        }
+        else
+        if(selectMenu==2){//Quit
+          score=0;
+          menu=0;
+          menuPage=0;
+          selectMenu=0;
+          Menu(0);
+          for(int i=0;i<15;i++)
+            for(int j=0;j<15;j++)
+              matrix[i][j]=0;
+          headDirection=1;
+          head=0;
+          tail=0;
+          for(int i=0;i<250;i++){
+            body[i].x=7;
+            body[i].y=7;
+          }
+          delay(2000*loadingScreenMultiplier+1000);
+        }
+        if(sunet==true);
+          //tone(BUZZER,2000,700);
+      }
+      else if(btnSusStare==HIGH){
+        if(selectMenu<nrOptionsMenu-1)
+          selectMenu++;
+        PauseGameMenu(selectMenu);
+      }
+      else if(btnJosStare==HIGH){
+        if(selectMenu>0)
+          selectMenu--;
+        PauseGameMenu(selectMenu);
+      }
+      delay(100);
+    }
+  }
+  else
+  if(menu==3){//Joc 3 Ships
+    if(menuPage==0){//Play
+      if(stage==0||stage==1){//Plaseaza nave player 1/player 2
+        if(shown==false){
+          shown=true;
+          selectedShip=2;
+          shipsToPlace=6;
+          headDirection=1;
+          player=0;
+          color=ST7735_GREEN;
+          Game3GFX(player,selectedShip);
+          pozPlayerX=5;
+          pozPlayerY=5;
+        }
+        
+        if(btnSusStare==HIGH){
+          int marj=0;
+          if(headDirection==3)
+            marj=selectedShip-1;
+          if(pozPlayerY+marj<9){
+            pozPlayerY++;
+          }
+          Serial.print("Jos");
+        }
+        if(btnDrpStare==HIGH){
+          int marj=0;
+          if(headDirection==2)
+            marj=selectedShip-1;
+          if(pozPlayerX+marj<9){
+            pozPlayerX++;
+          }
+          Serial.print("Drp");
+        }
+        if(btnJosStare==HIGH){
+          int marj=0;
+          if(headDirection==1)
+            marj=selectedShip-1;
+          if(pozPlayerY-marj>0){
+            pozPlayerY--;
+          }
+          Serial.print("Sus");
+        }
+        if(btnStgStare==HIGH){
+          int marj=0;
+          if(headDirection==3)
+            marj=selectedShip-1;
+          if(pozPlayerX-marj>0){
+            pozPlayerX--;
+          }
+          Serial.print("Stg");
+        }
+        if(btnNotStare==HIGH){//trebuie facut pe 4 cazuri
+          int marj=selectedShip;
+          if(headDirection+1>4){
+            if(pozPlayerX+marj*directions[1].x<=9&&pozPlayerX-marj*directions[1].x>=0)
+              if(pozPlayerY+marj*directions[1].y<=9&&pozPlayerY-marj*directions[1].y>=0)
+                headDirection++;
+          }
+          else{
+            if(pozPlayerX+marj*directions[headDirection+1].x<=9&&pozPlayerX-marj*directions[headDirection+1].x>=0)
+              if(pozPlayerY+marj*directions[headDirection+1].y<=9&&pozPlayerY-marj*directions[headDirection+1].y>=0)
+                headDirection++;
+          }
+          
+          if(headDirection>4)
+            headDirection=1;
+        }
+        if(btnYesStare==HIGH){
+          if(CanBePlaced(selectedShip,headDirection,pozPlayerX,pozPlayerY)){
+            PlaceShip(selectedShip,headDirection,pozPlayerX,pozPlayerY,color);
+            shipsToPlace--;
+            if(shipsToPlace>0){
+              if(shipsToPlace>3)
+                selectedShip=2;
+              else
+              if(shipsToPlace>1)
+                selectedShip=3;
+              else
+              if(shipsToPlace>0)
+                selectedShip=4;
+            }
+            else{
+              if(stage==0){
+                color=ST7735_RED;
+                shipsToPlace=6;
+                selectedShip=2;
+                headDirection=1;
+                DonePlaceing1();
+                stage=1;
+              }
+              else{
+                color=ST7735_GREEN;
+                shipsToPlace=6;
+                selectedShip=2;
+                headDirection=1;
+                DonePlaceing2();
+                stage=2;
+                shipsLeft1=6;
+                shipsLeft2=6;
+                player=0;
+              }
+            }
+            PreviewShip(selectedShip,ST7735_BLUE);
+            delay(500);
+          }
+          else{
+            Serial.println("Can't be placed");
+          }
+        }
+
+        if(btnSusStare==HIGH||btnDrpStare==HIGH||btnJosStare==HIGH||btnStgStare==HIGH||btnNotStare==HIGH){
+          MoveShip(selectedShip,headDirection,pozPlayerX,pozPlayerY,ST77XX_CYAN,color);
+          delay(400);
+        }
+      }
+      else
+      if(stage==2){//Atac
+        if(btnSusStare==HIGH){
+          if(pozPlayerY<9){
+            StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,false);
+            pozPlayerY++;
+          }
+          Serial.print("Jos");
+        }
+        if(btnDrpStare==HIGH){
+          if(pozPlayerX<9){
+            StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,false);
+            pozPlayerX++;
+          }
+          Serial.print("Drp");
+        }
+        if(btnJosStare==HIGH){
+          if(pozPlayerY>0){
+            StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,false);
+            pozPlayerY--;
+          }
+          Serial.print("Sus");
+        }
+        if(btnStgStare==HIGH){
+          if(pozPlayerX>0){
+            StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,false);
+            pozPlayerX--;
+          }
+          Serial.print("Stg");
+        }
+        if(btnYesStare==HIGH){
+          StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,false);
+          tft.fillRect(10,20,100,8,ST77XX_BLACK);
+          if(player==0){
+            if(matrixPlayer2[pozPlayerY][pozPlayerX]!=0){//Hit
+              scrieText("HIT!", ST77XX_WHITE, 15, 23, true, 1);
+              Strike(pozPlayerX,pozPlayerY,true);
+              if(sunet==true){
+                tone(BUZZER,3000,100);
+                tone(BUZZER,3000,100);
+                tone(BUZZER,3000,100);
+              }
+              delay(2000*loadingScreenMultiplier+1000);
+              shipsLeft2--;
+            }
+            else{//Miss
+              scrieText("MISS!", ST77XX_WHITE, 15, 23, true, 1);
+              Strike(pozPlayerX,pozPlayerY,false);
+              if(sunet==true){
+                tone(BUZZER,3000,150);
+                tone(BUZZER,3000,150);
+              }
+              delay(2000*loadingScreenMultiplier+1000);
+            }
+            matrixPlayer2[pozPlayerY][pozPlayerX]%=800;
+            matrixPlayer2[pozPlayerY][pozPlayerX]+=500;
+            player=1;
+          }
+          else{
+            if(matrixPlayer1[pozPlayerY][pozPlayerX]!=0){//Hit
+              scrieText("HIT!", ST77XX_WHITE, 15, 23, true, 1);
+              Strike(pozPlayerX,pozPlayerY,true);
+              if(sunet==true){
+                tone(BUZZER,3000,100);
+                tone(BUZZER,3000,100);
+                tone(BUZZER,3000,100);
+              }
+              delay(2000*loadingScreenMultiplier+1000);
+              shipsLeft1--;
+            }
+            else{//Miss
+              matrixPlayer1[pozPlayerY][pozPlayerX]=-2;
+              scrieText("MISS!", ST77XX_WHITE, 15, 23, true, 1);
+              Strike(pozPlayerX,pozPlayerY,false);
+              if(sunet==true){
+                tone(BUZZER,3000,150);
+                tone(BUZZER,3000,150);
+              }
+              delay(2000*loadingScreenMultiplier+1000);
+            }
+            matrixPlayer1[pozPlayerY][pozPlayerX]%=800;
+            matrixPlayer1[pozPlayerY][pozPlayerX]+=500;
+            player=0;
+          }
+          StergeGFX(pozPlayerX,pozPlayerY,true,true,true,true,true);
+          Game3GFX(player,0);
+        }
+
+        if(btnSusStare==HIGH||btnDrpStare==HIGH||btnJosStare==HIGH||btnStgStare==HIGH){
+          SelectSquareGFX(-1,0,pozPlayerX,pozPlayerY);
+          delay(400);
+        }
+        
+      }
+      else
+      if(stage==3){//Gameover
+        
+      } 
+      delay(100);
+    }
+  }
+
+}
